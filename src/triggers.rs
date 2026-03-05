@@ -2,18 +2,18 @@ use pgrx::prelude::*;
 use pgrx::trigger_support::PgTriggerOperation;
 use std::num::NonZero;
 
-/// Install a trigger that syncs row changes to an Antfly collection.
+/// Install a trigger that syncs row changes to an Antfly table.
 ///
 /// Usage:
 ///   CREATE TRIGGER sync_to_antfly
 ///     AFTER INSERT OR UPDATE OR DELETE ON my_table
 ///     FOR EACH ROW
-///     EXECUTE FUNCTION antfly_sync_trigger('http://localhost:8080', 'my_collection', 'id');
+///     EXECUTE FUNCTION antfly_sync_trigger('http://localhost:8080/api/v1/', 'my_table', 'id');
 ///
 /// Arguments:
-///   1. base_url  - Antfly server URL
-///   2. collection - Target Antfly collection name
-///   3. id_column  - Column to use as the document ID (default: "id")
+///   1. base_url  - Antfly server URL (including /api/v1/ prefix)
+///   2. table     - Target Antfly table name
+///   3. id_column - Column to use as the document ID (default: "id")
 #[pg_trigger]
 fn antfly_sync_trigger<'a>(
     trigger: &'a pgrx::PgTrigger<'a>,

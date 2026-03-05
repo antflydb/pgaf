@@ -1,14 +1,13 @@
 use pgrx::prelude::*;
 
-use crate::client::{AntflyClient, SearchRequest};
+use crate::client::AntflyClient;
 
 /// Search an Antfly collection and return (id, score, data) tuples.
 ///
 /// Usage:
-///   SELECT * FROM antfly_search('http://localhost:8080', 'my_collection', 'search query');
+///   SELECT * FROM antfly_search('http://localhost:8080/api/v1/', 'my_collection', 'search query');
 ///
-/// Returns a set of (id TEXT, score FLOAT8, data JSONB) rows that can be
-/// joined back to the source table.
+/// Returns a set of (id TEXT, score FLOAT8, data JSONB) rows.
 #[pg_extern]
 fn antfly_search(
     base_url: &str,
@@ -27,40 +26,21 @@ fn antfly_search(
         pgrx::error!("pgaf: failed to create client: {}", e);
     });
 
-    let req = SearchRequest {
-        table: collection,
-        query_string: "",
-        fields: vec![],
-        limit: limit.map(|l| l as i64).or(Some(10)),
-        end_user_search: query,
-        models: vec![],
-    };
-
-    let hits = client.search(&req).unwrap_or_else(|e| {
-        pgrx::error!("pgaf: search failed: {}", e);
-    });
+    let hits = client
+        .search(collection, query, limit.map(|l| l as i64).or(Some(10)))
+        .unwrap_or_else(|e| {
+            pgrx::error!("pgaf: search failed: {}", e);
+        });
 
     let rows: Vec<_> = hits
         .into_iter()
-        .map(|hit| {
-            let id = hit
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let score = hit
-                .get("score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            (id, score, pgrx::JsonB(hit))
-        })
+        .map(|hit| (hit.id, hit.score, pgrx::JsonB(hit.source)))
         .collect();
 
     TableIterator::new(rows)
 }
 
-/// Retrieve the configured Antfly server URL from a GUC or table option.
-/// For now, a simple helper that validates connectivity.
+/// Check connectivity to an Antfly server.
 #[pg_extern]
 fn antfly_status(base_url: &str) -> String {
     match AntflyClient::new(base_url) {

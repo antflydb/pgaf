@@ -2,7 +2,7 @@ use pgrx::pg_sys;
 
 use super::ctid::doc_id_to_ctid;
 use super::options;
-use crate::client::{AntflyClient, SearchRequest};
+use crate::client::AntflyClient;
 
 struct AntflyScanState {
     results: Vec<(pg_sys::ItemPointerData, f64)>,
@@ -70,6 +70,27 @@ pub unsafe extern "C-unwind" fn amrescan(
     state.query = query_text;
 }
 
+/// Build the query body from the RHS of @@@.
+///
+/// If the text parses as a JSON object (from a query builder function),
+/// use it as a structured query. Otherwise, treat it as a plain full-text
+/// search string.
+fn build_query_body(query: &str, limit: i64) -> serde_json::Value {
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(query) {
+        if v.is_object() {
+            // Structured query from pgaf.search() / pgaf.semantic() / pgaf.hybrid()
+            v["limit"] = serde_json::json!(limit);
+            return v;
+        }
+    }
+
+    // Plain text — wrap as full-text search
+    serde_json::json!({
+        "full_text_search": { "query": query },
+        "limit": limit,
+    })
+}
+
 #[pgrx::pg_guard]
 pub unsafe extern "C-unwind" fn amgettuple(
     scan: pg_sys::IndexScanDesc,
@@ -91,25 +112,15 @@ pub unsafe extern "C-unwind" fn amgettuple(
                 pgrx::error!("pgaf: failed to create client: {}", e);
             });
 
-            let req = SearchRequest {
-                table: &collection,
-                query_string: "",
-                fields: vec![],
-                limit: Some(10000),
-                end_user_search: query,
-                models: vec![],
-            };
+            let body = build_query_body(query, 10000);
 
-            let hits = client.search(&req).unwrap_or_else(|e| {
+            let hits = client.search_raw(&collection, &body).unwrap_or_else(|e| {
                 pgrx::error!("pgaf: search failed: {}", e);
             });
 
             for hit in hits {
-                let doc_id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-                if let Some(ctid) = doc_id_to_ctid(doc_id) {
-                    state.results.push((ctid, score));
+                if let Some(ctid) = doc_id_to_ctid(&hit.id) {
+                    state.results.push((ctid, hit.score));
                 }
             }
         }

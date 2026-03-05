@@ -22,6 +22,11 @@ pub unsafe extern "C-unwind" fn ambuild(
         pgrx::error!("pgaf: failed to create Antfly client: {}", e);
     });
 
+    // Ensure the table exists in Antfly before syncing documents.
+    if let Err(e) = client.ensure_table(&collection) {
+        pgrx::warning!("pgaf: failed to create table in Antfly: {}", e);
+    }
+
     let mut state = BuildState {
         client,
         collection,

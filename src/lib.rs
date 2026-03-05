@@ -1,8 +1,10 @@
 ::pgrx::pg_module_magic!();
 
 mod client;
+mod e2e_tests;
 mod functions;
 mod index_am;
+mod query;
 mod triggers;
 
 #[allow(non_snake_case)]

@@ -1,29 +1,21 @@
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 /// HTTP client for communicating with an Antfly server.
+///
+/// The base URL should include the API version prefix with a trailing slash,
+/// e.g. `http://localhost:8080/api/v1/`.
 pub struct AntflyClient {
     base_url: Url,
     http: Client,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SearchRequest<'a> {
-    pub table: &'a str,
-    pub query_string: &'a str,
-    pub fields: Vec<&'a str>,
-    pub limit: Option<i64>,
-    pub end_user_search: &'a str,
-    pub models: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
+/// A single search result from Antfly.
 pub struct SearchHit {
     pub id: String,
     pub score: f64,
-    #[serde(flatten)]
-    pub fields: serde_json::Value,
+    pub source: Value,
 }
 
 #[derive(Debug)]
@@ -45,56 +37,152 @@ impl std::fmt::Display for ClientError {
 
 impl AntflyClient {
     pub fn new(base_url: &str) -> Result<Self, ClientError> {
-        let base_url =
-            Url::parse(base_url).map_err(|e| ClientError::InvalidUrl(base_url.to_string(), e))?;
+        // Ensure trailing slash so Url::join works correctly with relative paths.
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_string()
+        } else {
+            format!("{}/", base_url)
+        };
+        let base_url = Url::parse(&normalized)
+            .map_err(|e| ClientError::InvalidUrl(base_url.to_string(), e))?;
         Ok(Self {
             base_url,
             http: Client::new(),
         })
     }
 
-    /// Search an Antfly collection, returning raw JSON hits.
-    pub fn search(&self, req: &SearchRequest) -> Result<Vec<serde_json::Value>, ClientError> {
-        let url = self
-            .base_url
-            .join("query")
-            .map_err(|e| ClientError::InvalidUrl("query".to_string(), e))?;
-
-        let resp = self
-            .http
-            .post(url)
-            .json(req)
-            .send()
-            .map_err(ClientError::Request)?
-            .error_for_status()
-            .map_err(ClientError::Request)?;
-
-        let body: serde_json::Value = resp.json().map_err(ClientError::Request)?;
-
-        match body {
-            serde_json::Value::Array(rows) => Ok(rows),
-            _ => Err(ClientError::ResponseFormat(
-                "expected JSON array".to_string(),
-            )),
+    /// Full-text search shorthand.
+    ///
+    /// Sends `POST /tables/{table}/query` with a `full_text_search` body.
+    pub fn search(
+        &self,
+        table: &str,
+        query: &str,
+        limit: Option<i64>,
+    ) -> Result<Vec<SearchHit>, ClientError> {
+        let mut body = serde_json::json!({
+            "full_text_search": { "query": query },
+        });
+        if let Some(n) = limit {
+            body["limit"] = serde_json::json!(n);
         }
+        self.search_raw(table, &body)
     }
 
-    /// Notify Antfly to sync a document.
-    pub fn sync_document(
+    /// Send an arbitrary query body to Antfly and parse the results.
+    ///
+    /// The body is sent as-is to `POST /tables/{table}/query`.
+    /// Callers (e.g. the query builder functions) construct the JSON.
+    pub fn search_raw(
         &self,
-        collection: &str,
-        doc_id: &str,
-        doc: &serde_json::Value,
-    ) -> Result<(), ClientError> {
-        let path = format!("collections/{}/documents/{}", collection, doc_id);
+        table: &str,
+        body: &Value,
+    ) -> Result<Vec<SearchHit>, ClientError> {
+        let path = format!("tables/{}/query", table);
         let url = self
             .base_url
             .join(&path)
             .map_err(|e| ClientError::InvalidUrl(path, e))?;
 
+        let resp = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .map_err(ClientError::Request)?
+            .error_for_status()
+            .map_err(ClientError::Request)?;
+
+        let resp_body: Value = resp.json().map_err(ClientError::Request)?;
+
+        // Antfly response: {"responses": [{"hits": {"hits": [...]}}]}
+        let hits = resp_body
+            .get("responses")
+            .and_then(|r| r.get(0))
+            .and_then(|r| r.get("hits"))
+            .and_then(|h| h.get("hits"))
+            .and_then(|h| h.as_array())
+            .ok_or_else(|| {
+                ClientError::ResponseFormat(format!(
+                    "expected responses[0].hits.hits array, got: {}",
+                    resp_body
+                ))
+            })?;
+
+        let results = hits
+            .iter()
+            .map(|hit| SearchHit {
+                id: hit
+                    .get("_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                score: hit
+                    .get("_score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                source: hit
+                    .get("_source")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Ensure a table exists in Antfly, creating it if necessary.
+    ///
+    /// Sends `POST /tables/{table}` with a minimal config. Ignores 409 (already exists).
+    pub fn ensure_table(&self, table: &str) -> Result<(), ClientError> {
+        let path = format!("tables/{}", table);
+        let url = self
+            .base_url
+            .join(&path)
+            .map_err(|e| ClientError::InvalidUrl(path, e))?;
+
+        let body = serde_json::json!({ "num_shards": 1 });
+
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .map_err(ClientError::Request)?;
+
+        // 200/201 = created, 409 = already exists — both fine
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 409 {
+            Ok(())
+        } else {
+            resp.error_for_status().map_err(ClientError::Request)?;
+            Ok(())
+        }
+    }
+
+    /// Insert a single document via the batch API.
+    ///
+    /// Uses `sync_level: "full_text"` so the document is immediately searchable.
+    pub fn sync_document(
+        &self,
+        table: &str,
+        doc_id: &str,
+        doc: &Value,
+    ) -> Result<(), ClientError> {
+        let path = format!("tables/{}/batch", table);
+        let url = self
+            .base_url
+            .join(&path)
+            .map_err(|e| ClientError::InvalidUrl(path, e))?;
+
+        let body = serde_json::json!({
+            "inserts": { doc_id: doc },
+            "sync_level": "full_text",
+        });
+
         self.http
-            .put(url)
-            .json(doc)
+            .post(url)
+            .json(&body)
             .send()
             .map_err(ClientError::Request)?
             .error_for_status()
@@ -103,16 +191,21 @@ impl AntflyClient {
         Ok(())
     }
 
-    /// Notify Antfly to delete a document.
-    pub fn delete_document(&self, collection: &str, doc_id: &str) -> Result<(), ClientError> {
-        let path = format!("collections/{}/documents/{}", collection, doc_id);
+    /// Delete a single document via the batch API.
+    pub fn delete_document(&self, table: &str, doc_id: &str) -> Result<(), ClientError> {
+        let path = format!("tables/{}/batch", table);
         let url = self
             .base_url
             .join(&path)
             .map_err(|e| ClientError::InvalidUrl(path, e))?;
 
+        let body = serde_json::json!({
+            "deletes": [doc_id],
+        });
+
         self.http
-            .delete(url)
+            .post(url)
+            .json(&body)
             .send()
             .map_err(ClientError::Request)?
             .error_for_status()
