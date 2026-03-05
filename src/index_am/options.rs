@@ -17,8 +17,10 @@ impl AntflyReloption {
         if this.is_null() || offset == 0 {
             return default;
         }
-        let ptr = (this as *const u8).add(offset as usize);
-        unsafe { CStr::from_ptr(ptr.cast()) }
+        unsafe {
+            let ptr = (this as *const u8).add(offset as usize);
+            CStr::from_ptr(ptr.cast())
+        }
     }
 
     pub unsafe fn url(this: *const Self) -> &'static CStr {
@@ -62,11 +64,13 @@ fn relopt_table() -> Vec<pg_sys::relopt_parse_elt> {
             optname: c"url".as_ptr(),
             opttype: pg_sys::relopt_type::RELOPT_TYPE_STRING,
             offset: std::mem::offset_of!(AntflyReloption, url_offset) as i32,
+            isset_offset: 0,
         },
         pg_sys::relopt_parse_elt {
             optname: c"collection".as_ptr(),
             opttype: pg_sys::relopt_type::RELOPT_TYPE_STRING,
             offset: std::mem::offset_of!(AntflyReloption, collection_offset) as i32,
+            isset_offset: 0,
         },
     ]
 }
@@ -93,18 +97,17 @@ pub unsafe extern "C-unwind" fn amoptions(
 
 /// Extract URL and collection from an index relation's reloptions.
 pub unsafe fn get_options(index_relation: pg_sys::Relation) -> (String, String) {
-    let rd_options = unsafe { (*index_relation).rd_options as *const AntflyReloption };
-    let url = unsafe { AntflyReloption::url(rd_options) }
-        .to_str()
-        .unwrap_or("http://localhost:8080")
-        .to_string();
-    let collection_raw = unsafe { AntflyReloption::collection(rd_options) }
-        .to_str()
-        .unwrap_or("");
+    unsafe {
+        let rd_options = (*index_relation).rd_options as *const AntflyReloption;
+        let url = AntflyReloption::url(rd_options)
+            .to_str()
+            .unwrap_or("http://localhost:8080")
+            .to_string();
+        let collection_raw = AntflyReloption::collection(rd_options)
+            .to_str()
+            .unwrap_or("");
 
-    let collection = if collection_raw.is_empty() {
-        // Default to the heap table name
-        unsafe {
+        let collection = if collection_raw.is_empty() {
             let heap_oid = (*(*index_relation).rd_index).indrelid;
             let heap_rel = pg_sys::RelationIdGetRelation(heap_oid);
             let name = CStr::from_ptr((*(*heap_rel).rd_rel).relname.data.as_ptr())
@@ -113,10 +116,10 @@ pub unsafe fn get_options(index_relation: pg_sys::Relation) -> (String, String) 
                 .to_string();
             pg_sys::RelationClose(heap_rel);
             name
-        }
-    } else {
-        collection_raw.to_string()
-    };
+        } else {
+            collection_raw.to_string()
+        };
 
-    (url, collection)
+        (url, collection)
+    }
 }

@@ -14,8 +14,15 @@ fn antfly_search(
     base_url: &str,
     collection: &str,
     query: &str,
-    limit: default!(Option<i32>, "NULL"),
-) -> TableIterator<'static, (name!(id, String), name!(score, f64), name!(data, pgrx::JsonB))> {
+    limit: pgrx::default!(Option<i32>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(id, String),
+        name!(score, f64),
+        name!(data, pgrx::JsonB),
+    ),
+> {
     let client = AntflyClient::new(base_url).unwrap_or_else(|e| {
         pgrx::error!("pgaf: failed to create client: {}", e);
     });

@@ -1,4 +1,6 @@
 use pgrx::prelude::*;
+use pgrx::trigger_support::PgTriggerOperation;
+use std::num::NonZero;
 
 /// Install a trigger that syncs row changes to an Antfly collection.
 ///
@@ -13,19 +15,10 @@ use pgrx::prelude::*;
 ///   2. collection - Target Antfly collection name
 ///   3. id_column  - Column to use as the document ID (default: "id")
 #[pg_trigger]
-fn antfly_sync_trigger(
-    trigger: &pgrx::PgTrigger,
-) -> Result<
-    Option<PgHeapTuple<'_, impl WhoAllocated<pgrx::pg_sys::HeapTupleData>>>,
-    pgrx::spi::Error,
-> {
-    let args: Vec<String> = unsafe {
-        let tg_args = trigger.num_args();
-        (0..tg_args)
-            .filter_map(|i| trigger.arg(i))
-            .map(|s| s.to_string())
-            .collect()
-    };
+fn antfly_sync_trigger<'a>(
+    trigger: &'a pgrx::PgTrigger<'a>,
+) -> Result<Option<PgHeapTuple<'a, impl WhoAllocated>>, pgrx::spi::Error> {
+    let args = trigger.extra_args().unwrap_or_else(|_| vec![]);
 
     let base_url = args.first().unwrap_or_else(|| {
         pgrx::error!("pgaf: antfly_sync_trigger requires base_url as first argument");
@@ -33,20 +26,19 @@ fn antfly_sync_trigger(
     let collection = args.get(1).unwrap_or_else(|| {
         pgrx::error!("pgaf: antfly_sync_trigger requires collection as second argument");
     });
-    let id_column = args
-        .get(2)
-        .map(|s| s.as_str())
-        .unwrap_or("id");
+    let id_column = args.get(2).map(|s| s.as_str()).unwrap_or("id");
 
     let client = crate::client::AntflyClient::new(base_url).unwrap_or_else(|e| {
         pgrx::error!("pgaf: failed to create client: {}", e);
     });
 
-    let event = unsafe { trigger.event() };
+    let op = trigger.op().unwrap_or_else(|_| {
+        pgrx::error!("pgaf: could not determine trigger operation");
+    });
 
     // Handle DELETE: use OLD row
-    if event.fired_by_delete() {
-        if let Some(old) = unsafe { trigger.old() } {
+    if matches!(op, PgTriggerOperation::Delete) {
+        if let Some(old) = trigger.old() {
             let doc_id = get_id_from_tuple(&old, id_column);
             if let Err(e) = client.delete_document(collection, &doc_id) {
                 pgrx::warning!("pgaf: failed to delete from antfly: {}", e);
@@ -56,7 +48,7 @@ fn antfly_sync_trigger(
     }
 
     // Handle INSERT/UPDATE: use NEW row
-    if let Some(new) = unsafe { trigger.new() } {
+    if let Some(new) = trigger.new() {
         let doc_id = get_id_from_tuple(&new, id_column);
         let doc = heap_tuple_to_json(&new);
 
@@ -71,16 +63,12 @@ fn antfly_sync_trigger(
 }
 
 /// Extract the ID value from a heap tuple by column name.
-fn get_id_from_tuple(
-    tuple: &PgHeapTuple<'_, impl WhoAllocated<pgrx::pg_sys::HeapTupleData>>,
-    id_column: &str,
-) -> String {
+fn get_id_from_tuple(tuple: &PgHeapTuple<'_, impl WhoAllocated>, id_column: &str) -> String {
     tuple
         .get_by_name::<String>(id_column)
         .ok()
         .flatten()
         .unwrap_or_else(|| {
-            // Fall back to trying i64
             tuple
                 .get_by_name::<i64>(id_column)
                 .ok()
@@ -96,18 +84,19 @@ fn get_id_from_tuple(
 }
 
 /// Convert a heap tuple to a JSON object by iterating its attributes.
-fn heap_tuple_to_json(
-    tuple: &PgHeapTuple<'_, impl WhoAllocated<pgrx::pg_sys::HeapTupleData>>,
-) -> serde_json::Value {
+fn heap_tuple_to_json(tuple: &PgHeapTuple<'_, impl WhoAllocated>) -> serde_json::Value {
     let mut map = serde_json::Map::new();
 
-    for index in 1..=tuple.len() {
+    for i in 1..=tuple.len() {
+        let Some(index) = NonZero::new(i) else {
+            continue;
+        };
+
         let attr_name = match tuple.get_attribute_by_index(index) {
             Some(attr) => attr.name().to_string(),
             None => continue,
         };
 
-        // Try common types in order of likelihood
         if let Ok(Some(v)) = tuple.get_by_index::<String>(index) {
             map.insert(attr_name, serde_json::Value::String(v));
         } else if let Ok(Some(v)) = tuple.get_by_index::<i64>(index) {
@@ -121,7 +110,6 @@ fn heap_tuple_to_json(
         } else if let Ok(Some(v)) = tuple.get_by_index::<pgrx::JsonB>(index) {
             map.insert(attr_name, v.0);
         }
-        // NULL or unsupported types are silently skipped
     }
 
     serde_json::Value::Object(map)

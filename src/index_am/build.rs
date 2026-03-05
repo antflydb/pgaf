@@ -28,16 +28,23 @@ pub unsafe extern "C-unwind" fn ambuild(
         count: 0.0,
     };
 
+    // Call through the table AM's index_build_range_scan (table_index_build_scan
+    // is a static inline in tableam.h so not available as a direct binding)
     let reltuples = unsafe {
-        pg_sys::table_index_build_scan(
+        let heap_ref = heap_relation.as_ref().unwrap();
+        let table_am = heap_ref.rd_tableam.as_ref().unwrap();
+        table_am.index_build_range_scan.unwrap()(
             heap_relation,
             index_relation,
             index_info,
-            true,
-            false,
+            true,                        // allow_sync
+            false,                       // anyvisible
+            false,                       // progress
+            0,                           // start_blockno
+            pg_sys::InvalidBlockNumber,  // numblocks
             Some(build_callback),
             &mut state as *mut BuildState as *mut std::os::raw::c_void,
-            std::ptr::null_mut(),
+            std::ptr::null_mut(),        // scan
         )
     };
 
@@ -62,34 +69,34 @@ unsafe extern "C-unwind" fn build_callback(
     _tuple_is_alive: bool,
     state: *mut std::os::raw::c_void,
 ) {
-    let state = unsafe { &mut *(state as *mut BuildState) };
+    unsafe {
+        let state = &mut *(state as *mut BuildState);
 
-    if unsafe { *is_null.add(0) } {
-        return;
-    }
+        if *is_null.add(0) {
+            return;
+        }
 
-    let doc_id = ctid_to_doc_id(unsafe { *ctid });
-    let text: Option<String> =
-        unsafe { pgrx::datum::FromDatum::from_datum(*values.add(0), false) };
+        let doc_id = ctid_to_doc_id(*ctid);
+        let text: Option<String> = pgrx::datum::FromDatum::from_datum(*values.add(0), false);
 
-    if let Some(content) = text {
-        let doc = serde_json::json!({
-            "id": doc_id,
-            "content": content,
-        });
+        if let Some(content) = text {
+            let doc = serde_json::json!({
+                "id": doc_id,
+                "content": content,
+            });
 
-        if let Err(e) = state.client.sync_document(&state.collection, &doc_id, &doc) {
-            pgrx::warning!("pgaf: failed to sync document {}: {}", doc_id, e);
-        } else {
-            state.count += 1.0;
+            if let Err(e) = state.client.sync_document(&state.collection, &doc_id, &doc) {
+                pgrx::warning!("pgaf: failed to sync document {}: {}", doc_id, e);
+            } else {
+                state.count += 1.0;
+            }
         }
     }
 }
 
 #[pgrx::pg_guard]
 pub unsafe extern "C-unwind" fn ambuildempty(_index_relation: pg_sys::Relation) {
-    // No-op for remote index. Unlogged tables will have an empty index
-    // after crash recovery, which is acceptable.
+    // No-op for remote index.
 }
 
 #[pgrx::pg_guard]
@@ -104,30 +111,31 @@ pub unsafe extern "C-unwind" fn aminsert(
     _index_unchanged: bool,
     _index_info: *mut pg_sys::IndexInfo,
 ) -> bool {
-    if unsafe { *is_null.add(0) } {
-        return false;
-    }
-
-    let (url, collection) = unsafe { options::get_options(index_relation) };
-    let doc_id = ctid_to_doc_id(unsafe { *heap_tid });
-
-    let text: Option<String> =
-        unsafe { pgrx::datum::FromDatum::from_datum(*values.add(0), false) };
-
-    if let Some(content) = text {
-        let client = AntflyClient::new(&url).unwrap_or_else(|e| {
-            pgrx::error!("pgaf: failed to create client: {}", e);
-        });
-
-        let doc = serde_json::json!({
-            "id": doc_id,
-            "content": content,
-        });
-
-        if let Err(e) = client.sync_document(&collection, &doc_id, &doc) {
-            pgrx::warning!("pgaf: failed to sync document to antfly: {}", e);
+    unsafe {
+        if *is_null.add(0) {
+            return false;
         }
-    }
 
-    false
+        let (url, collection) = options::get_options(index_relation);
+        let doc_id = ctid_to_doc_id(*heap_tid);
+
+        let text: Option<String> = pgrx::datum::FromDatum::from_datum(*values.add(0), false);
+
+        if let Some(content) = text {
+            let client = AntflyClient::new(&url).unwrap_or_else(|e| {
+                pgrx::error!("pgaf: failed to create client: {}", e);
+            });
+
+            let doc = serde_json::json!({
+                "id": doc_id,
+                "content": content,
+            });
+
+            if let Err(e) = client.sync_document(&collection, &doc_id, &doc) {
+                pgrx::warning!("pgaf: failed to sync document to antfly: {}", e);
+            }
+        }
+
+        false
+    }
 }
