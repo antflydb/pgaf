@@ -2,7 +2,14 @@
 
 mod client;
 mod functions;
+mod index_am;
 mod triggers;
+
+#[allow(non_snake_case)]
+#[pgrx::pg_guard]
+pub unsafe extern "C-unwind" fn _PG_init() {
+    index_am::options::init();
+}
 
 #[cfg(test)]
 pub mod pg_test {

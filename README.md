@@ -1,12 +1,12 @@
 # pgaf
 
-PostgreSQL extension for [Antfly](https://github.com/antflydb/antfly). Provides search functions, row sync triggers, and (planned) a custom index access method — so Antfly-powered search feels native to Postgres.
+PostgreSQL extension for [Antfly](https://github.com/antflydb/antfly). Provides a custom index access method, search functions, and row sync triggers — so Antfly-powered search feels native to Postgres.
 
 ## Features
 
+- **Custom Index AM** — `CREATE INDEX ... USING antfly` for planner-integrated search
 - **`antfly_search()`** — query an Antfly collection from SQL and join results back to your tables
 - **`antfly_sync_trigger()`** — trigger that pushes row changes to Antfly on INSERT/UPDATE/DELETE
-- **Custom Index AM** (planned) — `CREATE INDEX ... USING antfly` for planner-integrated search
 
 ## Requirements
 
@@ -36,9 +36,33 @@ CREATE EXTENSION pgaf;
 
 ## Usage
 
-### Search
+### Index Access Method
 
-Query an Antfly collection and join results back to a Postgres table:
+Create an Antfly-backed index on a text column:
+
+```sql
+CREATE INDEX idx_content ON docs USING antfly (content)
+  WITH (url = 'http://localhost:8080', collection = 'my_docs');
+```
+
+Query naturally — the planner uses the Antfly index:
+
+```sql
+SELECT * FROM docs WHERE content @@@ 'fix my computer';
+```
+
+The `@@@` operator delegates search to Antfly. On `CREATE INDEX`, all existing rows are pushed to Antfly. Subsequent inserts are synced automatically via the index AM.
+
+**WITH options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `url` | `http://localhost:8080` | Antfly server URL |
+| `collection` | table name | Target Antfly collection |
+
+### Search Function
+
+For cases where you need scores or want to join search results explicitly:
 
 ```sql
 SELECT t.*, s.score
@@ -51,8 +75,6 @@ JOIN antfly_search(
 ORDER BY s.score DESC;
 ```
 
-The function signature:
-
 ```sql
 antfly_search(base_url TEXT, collection TEXT, query TEXT, limit INT DEFAULT NULL)
 RETURNS TABLE (id TEXT, score FLOAT8, data JSONB)
@@ -60,7 +82,7 @@ RETURNS TABLE (id TEXT, score FLOAT8, data JSONB)
 
 ### Triggers
 
-Automatically sync row changes to Antfly:
+Automatically sync row changes to Antfly (useful when not using the index AM):
 
 ```sql
 CREATE TRIGGER sync_to_antfly
@@ -73,8 +95,6 @@ CREATE TRIGGER sync_to_antfly
   );
 ```
 
-Every insert/update pushes the full row as JSON. Deletes remove the document from Antfly.
-
 ### Status Check
 
 ```sql
@@ -85,10 +105,19 @@ SELECT antfly_status('http://localhost:8080');
 
 ```
 src/
-├── lib.rs         # Extension entry point
-├── client.rs      # Antfly HTTP client
-├── functions.rs   # SQL functions (antfly_search, antfly_status)
-└── triggers.rs    # Trigger function (antfly_sync_trigger)
+├── lib.rs            # Extension entry point + _PG_init
+├── client.rs         # Antfly HTTP client
+├── functions.rs      # SQL functions (antfly_search, antfly_status)
+├── triggers.rs       # Trigger function (antfly_sync_trigger)
+└── index_am/
+    ├── mod.rs        # AM handler (IndexAmRoutine)
+    ├── ctid.rs       # ctid ↔ document ID encoding
+    ├── options.rs    # WITH clause parsing (url, collection)
+    ├── build.rs      # ambuild, ambuildempty, aminsert
+    ├── scan.rs       # ambeginscan, amrescan, amgettuple, amendscan
+    ├── vacuum.rs     # ambulkdelete, amvacuumcleanup
+    ├── cost.rs       # amcostestimate
+    └── operator.rs   # @@@ operator and SQL registration
 ```
 
 ## Testing
