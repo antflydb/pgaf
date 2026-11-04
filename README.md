@@ -1,5 +1,8 @@
 # pgaf
 
+> [!IMPORTANT]
+> **This repository is archived.** Development moved to [`rs/crates/postgres`](https://github.com/antflydb/antfly/tree/main/rs/crates/postgres) in the Antfly monorepo, where the extension is now named `antfly_postgres`.
+
 PostgreSQL extension for [Antfly](https://github.com/antflydb/antfly). Provides a custom index access method, search functions, and row sync triggers — so Antfly-powered search feels native to Postgres.
 
 ## Features
